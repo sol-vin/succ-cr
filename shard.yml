@@ -1,0 +1,18 @@
+name: succ_cr
+version: 0.1.0
+description: SurfsUp Character Controller (SUCC) ported to Crystal for Lapis — Quake/Source-style 3D character movement for Godot 4
+authors:
+  - Ian Rash <redcodefinal@gmail.com>
+  - Mark Arneman (bearlikelion) <https://github.com/bearlikelion/SUCC>
+license: MIT
+
+dependencies:
+  lapis:
+    path: lib/lapis
+
+# Addons installed via 'lapis install addon <spec>' will be tracked here.
+addons: {}
+
+targets:
+  addon:
+    main: src/main.cr

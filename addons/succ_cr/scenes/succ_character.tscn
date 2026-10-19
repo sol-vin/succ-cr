@@ -1,0 +1,20 @@
+[gd_scene format=3 uid="uid://bm8y0d2rthlqb"]
+
+[ext_resource type="SUCCConfig" uid="uid://bm5856c52r687" path="res://addons/succ_cr/resources/default_config.tres" id="1_config"]
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_editor"]
+size = Vector3(0.813, 1.829, 0.813)
+
+[node name="SUCCCharacter" type="SUCC"]
+config = ExtResource("1_config")
+
+[node name="CameraRig" type="SUCCCamera" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.626, 0)
+spring_length = 0.0
+
+[node name="Camera3D" type="Camera3D" parent="CameraRig"]
+fov = 90.0
+
+[node name="EditorColliderPreview" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9145, 0)
+shape = SubResource("BoxShape3D_editor")

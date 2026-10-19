@@ -1,0 +1,17 @@
+[gd_resource type="SUCCConfig" format=3]
+
+[resource]
+jump_height = 1.158
+bhop_buffered_jump = false
+friction = 6.0
+max_velocity = 50.8
+enforce_max_velocity = true
+stand_height = 1.422
+crouch_height = 1.422
+standing_view_offset = 1.27
+crouch_view_offset = 1.27
+crouch_transition_mode = 1
+smooth_vertical_step = false
+bob_amount = 0.02
+bob_cycle = 0.6
+tilt_angle = 2.0

@@ -1,0 +1,12 @@
+[gd_resource type="SUCCConfig" format=3]
+
+[resource]
+gravity = 15.24
+jump_height = 0.533
+bhop_buffered_jump = false
+max_speed = 4.826
+enforce_max_velocity = true
+sprint_speed_modifier = 1.684
+bob_amount = 0.0
+bob_cycle = 0.8
+tilt_angle = 0.0

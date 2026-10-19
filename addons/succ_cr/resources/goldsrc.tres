@@ -1,0 +1,11 @@
+[gd_resource type="SUCCConfig" format=3]
+
+[resource]
+jump_height = 1.128
+bhop_buffered_jump = false
+max_velocity = 50.8
+enforce_max_velocity = true
+crouch_transition_mode = 1
+smooth_vertical_step = false
+bob_cycle = 0.8
+tilt_angle = 2.0
