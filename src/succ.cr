@@ -29,6 +29,7 @@ node SUCC < CharacterBody3D do
     CROUCHING = 3
     FALLING   = 4
     SURFING   = 5
+    SITTING   = 6
   end
 
   enum GameState : Int64
@@ -47,6 +48,9 @@ node SUCC < CharacterBody3D do
   signal jumped
   signal landed(fall_velocity : Float64)
   signal camera_mode_changed(mode : CameraMode)
+  signal sat_down(chair : Godot::Node3D)
+  signal stood_up
+  signal interacted(target : Godot::Object)
 
   # ===========================================================================
   # Exports
@@ -114,6 +118,13 @@ node SUCC < CharacterBody3D do
   @[Export]
   property action_camera_mode : String = "camera_mode"
 
+  @[Export]
+  property action_interact : String = "interact"
+
+  # Maximum reach distance in meters for the player interaction raycast.
+  @[Export(range: 0.5_f32..15.0_f32, step: 0.25_f32)]
+  property interact_distance : Float32 = 3.0_f32
+
   # Dictionary mapping internal action keys to Godot InputMap action names.
   property input_actions : Hash(String, String) = {
     "move_forward"  => "forward",
@@ -124,12 +135,14 @@ node SUCC < CharacterBody3D do
     "crouch"        => "crouch",
     "sprint"        => "sprint",
     "camera_mode"   => "camera_mode",
+    "interact"      => "interact",
   }
 
   # ===========================================================================
   # Runtime State
   # ===========================================================================
   property camera_rig : SUCCCamera? = nil
+  property interact_ray : Godot::RayCast3D? = nil
   property visual_root : Godot::Node3D? = nil
   property standing_collider : Godot::CollisionShape3D? = nil
   property crouching_collider : Godot::CollisionShape3D? = nil
@@ -137,7 +150,16 @@ node SUCC < CharacterBody3D do
   property floor_type : FloorType = FloorType::NONE
   property surf_normal : Vector3 = Vector3::UP
   property is_crouched : Bool = false
+  property is_sitting : Bool = false
+  property loading_blocked : Bool = false
+  property pre_sit_transform : Transform3D = Transform3D.identity
+  property active_chair : Godot::Node3D? = nil
+  property focused_interactable : Godot::Node? = nil
   property movement_state : MovementState = MovementState::IDLE
+
+  @_teleport_queued : Bool = false
+  @_teleport_from : Godot::Node3D? = nil
+  @_teleport_to : Godot::Node3D? = nil
 
   @_was_on_floor : Bool = false
   @_step_Lists_offset : Float32 = 0.0_f32
@@ -209,6 +231,7 @@ node SUCC < CharacterBody3D do
     _validate_input_actions
     _setup_colliders
     @camera_rig = _find_camera_rig
+    _setup_interact_ray
 
     cfg = active_config
     if rig = @camera_rig
@@ -297,10 +320,42 @@ node SUCC < CharacterBody3D do
         toggle_camera_mode
       end
     end
+
+    if is_mouse_look_enabled
+      if _action_exists("interact") && event.is_action_pressed(_action_name("interact"), false, false)
+        trigger_interact
+      elsif (mb = event.as_a?(Godot::InputEventMouseButton)) && mb.is_pressed && mb.get_button_index == Godot::MouseButton::MouseButtonLeft
+        if Godot::Input.mouse_mode == Godot::Input::MouseMode::MouseModeCaptured
+          trigger_interact
+        end
+      elsif @is_sitting && ((_action_exists("jump") && event.is_action_pressed(_action_name("jump"), false, false)) || (_action_exists("crouch") && event.is_action_pressed(_action_name("crouch"), false, false)))
+        stand
+      end
+    end
   end
 
   def _physics_process(delta : Float64) : Void
     dt = delta.to_f32
+
+    if @_teleport_queued
+      @_teleport_queued = false
+      if (orig = @_teleport_from) && (dest = @_teleport_to)
+        teleport_in_relation_to(orig, dest)
+      end
+      @_teleport_from = nil
+      @_teleport_to = nil
+    end
+
+    _update_interact_ray
+
+    if @is_sitting || @loading_blocked
+      self.velocity = Vector3.zero
+      @_phys_pos_prev = global_position
+      @_phys_pos_curr = global_position
+      _update_movement_state(Vector3.zero)
+      return
+    end
+
     @_phys_pos_prev = @_phys_pos_curr
     @_just_jumped = false
     @_pre_move_y_vel = velocity.y
@@ -349,6 +404,7 @@ node SUCC < CharacterBody3D do
     when MovementState::CROUCHING then "CROUCHING"
     when MovementState::FALLING   then "FALLING"
     when MovementState::SURFING   then "SURFING"
+    when MovementState::SITTING   then "SITTING"
     else                               "IDLE"
     end
   end
@@ -374,11 +430,11 @@ node SUCC < CharacterBody3D do
   end
 
   def is_movement_enabled : Bool
-    @game_state == GameState::PLAYING
+    @game_state == GameState::PLAYING && !@is_sitting && !@loading_blocked
   end
 
   def is_mouse_look_enabled : Bool
-    @game_state == GameState::PLAYING
+    @game_state == GameState::PLAYING && !@loading_blocked
   end
 
   def set_game_state(new_state : GameState) : Void
@@ -513,6 +569,7 @@ node SUCC < CharacterBody3D do
     @input_actions["crouch"] = @action_crouch unless @action_crouch.empty?
     @input_actions["sprint"] = @action_sprint unless @action_sprint.empty?
     @input_actions["camera_mode"] = @action_camera_mode unless @action_camera_mode.empty?
+    @input_actions["interact"] = @action_interact unless @action_interact.empty?
   end
 
   def _action_name(key : String) : String
@@ -1066,22 +1123,26 @@ node SUCC < CharacterBody3D do
 
   def _update_movement_state(wish_dir : Vector3) : Void
     new_state = @movement_state
-    case @floor_type
-    when FloorType::RAMP
-      new_state = MovementState::SURFING
-    when FloorType::NONE
-      new_state = MovementState::FALLING
-    when FloorType::GROUND
-      vel = velocity
-      horiz_speed = Vector2.new(vel.x, vel.z).length
-      if @is_crouched
-        new_state = MovementState::CROUCHING
-      elsif horiz_speed < 0.1_f32 && wish_dir.length_squared < 0.01_f32
-        new_state = MovementState::IDLE
-      elsif @sprint_enabled && is_movement_enabled && _action_pressed("sprint")
-        new_state = MovementState::SPRINTING
-      else
-        new_state = MovementState::WALKING
+    if @is_sitting
+      new_state = MovementState::SITTING
+    else
+      case @floor_type
+      when FloorType::RAMP
+        new_state = MovementState::SURFING
+      when FloorType::NONE
+        new_state = MovementState::FALLING
+      when FloorType::GROUND
+        vel = velocity
+        horiz_speed = Vector2.new(vel.x, vel.z).length
+        if @is_crouched
+          new_state = MovementState::CROUCHING
+        elsif horiz_speed < 0.1_f32 && wish_dir.length_squared < 0.01_f32
+          new_state = MovementState::IDLE
+        elsif @sprint_enabled && is_movement_enabled && _action_pressed("sprint")
+          new_state = MovementState::SPRINTING
+        else
+          new_state = MovementState::WALKING
+        end
       end
     end
 
@@ -1090,5 +1151,217 @@ node SUCC < CharacterBody3D do
       @movement_state = new_state
       movement_state_changed.emit(old_state, @movement_state)
     end
+  end
+
+  # ===========================================================================
+  # Interact Ray, Sit State & Relative Portal Teleportation
+  # ===========================================================================
+
+  def _setup_interact_ray : Void
+    return if @pointer.null?
+    parent_node : Godot::Node3D = self
+    if rig = @camera_rig
+      if cam = rig.camera || rig._find_camera(rig)
+        parent_node = cam
+      else
+        parent_node = rig
+      end
+    end
+
+    existing = parent_node.get_node_or_null("InteractRay").as_a?(Godot::RayCast3D)
+    ray = existing || Godot::RayCast3D.create
+    if !existing
+      ray.name = "InteractRay"
+      parent_node.add_child(ray, false, Godot::Node::InternalMode::InternalModeDisabled)
+    end
+    ray.enabled = true
+    ray.target_position = Vector3.new(0.0_f32, 0.0_f32, -@interact_distance)
+    ray.add_exception(self)
+    @interact_ray = ray
+  end
+
+  # Returns the `Godot::Node` currently hit by the player's interaction raycast (or `nil`).
+  def get_interact_collider : Godot::Node?
+    return nil if @pointer.null?
+    if ray = @interact_ray
+      if !ray.pointer.null?
+        ray.target_position = Vector3.new(0.0_f32, 0.0_f32, -@interact_distance)
+        if ray.is_colliding
+          col_obj = ray.get_collider
+          if !col_obj.pointer.null?
+            return col_obj.as_a?(Godot::Node)
+          end
+        end
+      end
+    end
+    nil
+  end
+
+  # Resolves a hit collider (or its ancestor) that responds to `interact`.
+  def _resolve_interactable(node : Godot::Node?) : Godot::Node?
+    curr = node
+    while curr && !curr.pointer.null?
+      return curr if curr.has_method("interact")
+      curr = curr.get_parent
+    end
+    nil
+  end
+
+  def _update_interact_ray : Void
+    hit_node = _resolve_interactable(get_interact_collider)
+    prev = @focused_interactable
+
+    if prev.try(&.pointer) != hit_node.try(&.pointer)
+      if old_node = prev
+        if !old_node.pointer.null? && old_node.has_method("unfocus")
+          old_node.call("unfocus")
+        end
+      end
+      @focused_interactable = hit_node
+      if new_node = hit_node
+        if !new_node.pointer.null? && new_node.has_method("focus")
+          new_node.call("focus")
+        end
+      end
+    end
+  end
+
+  # Invokes `interact` on the currently focused `Interactable` node (or stands up if currently sitting and looking at nothing).
+  def trigger_interact : Bool
+    if target = @focused_interactable
+      if !target.pointer.null? && target.has_method("interact")
+        target.call("interact", self)
+        interacted.emit(target)
+        return true
+      end
+    end
+    if @is_sitting
+      stand
+      return true
+    end
+    false
+  end
+
+  # Puts the player into the **Sit State** at `seat_global_transform`:
+  # - Disables movement (`is_movement_enabled == false`) while keeping mouse look active (`is_mouse_look_enabled == true`).
+  # - Positions the player so the camera sits at `seat_global_transform.origin` facing `seat_global_transform.basis`.
+  # - Constrains horizontal yaw to `[-yaw_right_deg, +yaw_left_deg]` and vertical pitch to `[pitch_down_deg, pitch_up_deg]`.
+  def sit(
+    seat_global_transform : Transform3D,
+    yaw_left_deg : Float32 = 80.0_f32,
+    yaw_right_deg : Float32 = 80.0_f32,
+    pitch_down_deg : Float32 = -60.0_f32,
+    pitch_up_deg : Float32 = 60.0_f32,
+    chair_node : Godot::Node3D? = nil
+  ) : Void
+    if !@is_sitting
+      @pre_sit_transform = global_transform
+    end
+
+    @is_sitting = true
+    @active_chair = chair_node
+    self.velocity = Vector3.zero
+
+    cfg = active_config
+    view_h = @is_crouched ? cfg.crouch_view_offset : cfg.standing_view_offset
+
+    # Extract horizontal forward direction from seat_global_transform
+    fwd = -seat_global_transform.basis.z
+    horiz_fwd = Vector3.new(fwd.x, 0.0_f32, fwd.z)
+    yaw_angle = if horiz_fwd.length_squared > 1e-5_f32
+                  Math.atan2(-horiz_fwd.x, -horiz_fwd.z)
+                else
+                  rotation.y
+                end
+
+    self.global_position = seat_global_transform.origin - Vector3.new(0.0_f32, view_h, 0.0_f32)
+    self.rotation = Vector3.new(0.0_f32, yaw_angle, 0.0_f32)
+    @_phys_pos_prev = global_position
+    @_phys_pos_curr = global_position
+
+    if rig = @camera_rig
+      rig.yaw_constrained = true
+      rig.accumulated_sit_yaw = 0.0_f32
+      rig.max_yaw_left_deg = yaw_left_deg
+      rig.max_yaw_right_deg = yaw_right_deg
+      rig.min_pitch_deg = pitch_down_deg
+      rig.max_pitch_deg = pitch_up_deg
+      rig.rotation = Vector3.zero
+    end
+
+    _update_movement_state(Vector3.zero)
+    if ch = chair_node
+      sat_down.emit(ch)
+    else
+      sat_down.emit(self)
+    end
+  end
+
+  # Exits the **Sit State**, restores the player's pre-sit position, and removes camera rotation constraints.
+  def stand : Void
+    return unless @is_sitting
+    @is_sitting = false
+    @active_chair = nil
+
+    if rig = @camera_rig
+      rig.yaw_constrained = false
+      rig.accumulated_sit_yaw = 0.0_f32
+    end
+
+    self.global_position = @pre_sit_transform.origin
+    @_phys_pos_prev = global_position
+    @_phys_pos_curr = global_position
+    _update_movement_state(Vector3.zero)
+    stood_up.emit
+  end
+
+  # Toggles between sitting at `seat_global_transform` and standing up.
+  def sit_toggle(
+    seat_global_transform : Transform3D,
+    yaw_left_deg : Float32 = 80.0_f32,
+    yaw_right_deg : Float32 = 80.0_f32,
+    pitch_down_deg : Float32 = -60.0_f32,
+    pitch_up_deg : Float32 = 60.0_f32,
+    chair_node : Godot::Node3D? = nil
+  ) : Bool
+    if @is_sitting
+      stand
+      false
+    else
+      sit(seat_global_transform, yaw_left_deg, yaw_right_deg, pitch_down_deg, pitch_up_deg, chair_node)
+      true
+    end
+  end
+
+  # Queues a relative non-Euclidean portal teleport from `origin_node` to `target_node` on the next physics tick.
+  def queue_teleport_in_relation_to(origin_node : Godot::Node3D, target_node : Godot::Node3D) : Void
+    @_teleport_from = origin_node
+    @_teleport_to = target_node
+    @_teleport_queued = true
+  end
+
+  # Immediately teleports the player from `origin_node`'s local space to `target_node`'s local space,
+  # preserving relative position, horizontal look orientation, and velocity vector.
+  def teleport_in_relation_to(origin_node : Godot::Node3D, target_node : Godot::Node3D) : Void
+    return if @pointer.null? || origin_node.pointer.null? || target_node.pointer.null?
+    orig_xf = origin_node.global_transform
+    dest_xf = target_node.global_transform
+
+    rel_xf = orig_xf.affine_inverse * global_transform
+    new_xf = dest_xf * rel_xf
+
+    # Preserve upright character capsule while rotating horizontal yaw
+    fwd = -new_xf.basis.z
+    horiz_fwd = Vector3.new(fwd.x, 0.0_f32, fwd.z)
+    new_yaw = horiz_fwd.length_squared > 1e-5_f32 ? Math.atan2(-horiz_fwd.x, -horiz_fwd.z) : rotation.y
+
+    self.global_position = new_xf.origin
+    self.rotation = Vector3.new(0.0_f32, new_yaw, 0.0_f32)
+    @_phys_pos_prev = global_position
+    @_phys_pos_curr = global_position
+
+    # Rotate velocity vector by the portal delta basis
+    rot_delta = dest_xf.basis * orig_xf.basis.inverse
+    self.velocity = rot_delta * velocity
   end
 end

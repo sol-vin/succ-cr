@@ -21,6 +21,14 @@ node SUCCCamera < SpringArm3D do
   property camera : Godot::Camera3D? = nil
   property step_offset : Float32 = 0.0_f32
 
+  # Sit-state rotation constraint properties
+  property yaw_constrained : Bool = false
+  property accumulated_sit_yaw : Float32 = 0.0_f32
+  property max_yaw_left_deg : Float32 = 80.0_f32
+  property max_yaw_right_deg : Float32 = 80.0_f32
+  property min_pitch_deg : Float32 = -60.0_f32
+  property max_pitch_deg : Float32 = 60.0_f32
+
   @base_y : Float32 = 0.0_f32
   @_physics_offset : Vector3 = Vector3.zero
   @_bob_offset : Float32 = 0.0_f32
@@ -148,9 +156,18 @@ node SUCCCamera < SpringArm3D do
     pitch_delta = relative.y * rad_per_dot * pitch_sign
 
     rot = rotation
-    max_pitch = 89.0_f32 * deg_to_rad
-    new_pitch = (rot.x + pitch_delta).clamp(-max_pitch, max_pitch)
+    min_pitch = @yaw_constrained ? (@min_pitch_deg * deg_to_rad) : (-89.0_f32 * deg_to_rad)
+    max_pitch = @yaw_constrained ? (@max_pitch_deg * deg_to_rad) : (89.0_f32 * deg_to_rad)
+    new_pitch = (rot.x + pitch_delta).clamp(min_pitch, max_pitch)
     self.rotation = Vector3.new(new_pitch, rot.y, rot.z)
+
+    if @yaw_constrained
+      min_yaw = -(@max_yaw_right_deg.abs * deg_to_rad)
+      max_yaw = @max_yaw_left_deg.abs * deg_to_rad
+      clamped_yaw = (@accumulated_sit_yaw + yaw_delta).clamp(min_yaw, max_yaw)
+      yaw_delta = clamped_yaw - @accumulated_sit_yaw
+      @accumulated_sit_yaw = clamped_yaw
+    end
 
     if target = @yaw_target
       if !target.pointer.null?
