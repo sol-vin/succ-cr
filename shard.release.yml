@@ -1,12 +1,13 @@
-name: crystal_addon
+name: succ_cr
 version: 0.1.0
 authors:
-  - Developer <developer@example.com>
+  - Ian Rash <redcodefinal@gmail.com>
 license: MIT
 
 dependencies:
   lapis:
-    path: lib/lapis
+    github: sol-vin/lapis
+    branch: 4.8-beta1
 
 targets:
   addon:
