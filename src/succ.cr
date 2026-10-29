@@ -152,7 +152,7 @@ node SUCC < CharacterBody3D do
   property is_crouched : Bool = false
   property is_sitting : Bool = false
   property loading_blocked : Bool = false
-  property pre_sit_transform : Transform3D = Transform3D.identity
+  property pre_sit_transform : Transform3D = Transform3D::IDENTITY
   property active_chair : Godot::Node3D? = nil
   property focused_interactable : Godot::Node? = nil
   property movement_state : MovementState = MovementState::IDLE
@@ -324,7 +324,7 @@ node SUCC < CharacterBody3D do
     if is_mouse_look_enabled
       if _action_exists("interact") && event.is_action_pressed(_action_name("interact"), false, false)
         trigger_interact
-      elsif (mb = event.as_a?(Godot::InputEventMouseButton)) && mb.is_pressed && mb.get_button_index == Godot::MouseButton::MouseButtonLeft
+      elsif (mb = event.as_a?(Godot::InputEventMouseButton)) && mb.is_pressed && mb.get_button_index.value == 1_i64
         if Godot::Input.mouse_mode == Godot::Input::MouseMode::MouseModeCaptured
           trigger_interact
         end
@@ -1168,7 +1168,7 @@ node SUCC < CharacterBody3D do
       end
     end
 
-    existing = parent_node.get_node_or_null("InteractRay").as_a?(Godot::RayCast3D)
+    existing = parent_node.get_node_or_null("InteractRay").as?(Godot::RayCast3D)
     ray = existing || Godot::RayCast3D.create
     if !existing
       ray.name = "InteractRay"

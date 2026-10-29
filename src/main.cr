@@ -9,6 +9,7 @@ require "./demo/succ_test_level"
 # In non-release builds, load in-editor test suites so they register with Lapis::Test
 # and appear in the Crystal Editor Hub (Unit Test Runner tab)
 {% unless flag?(:release) %}
+  ARGV.clear
   require "../spec/editor/**"
   require "./docs"
 {% end %}
