@@ -654,11 +654,16 @@ node SUCC < CharacterBody3D do
     while i < count
       col = get_slide_collision(i)
       if !col.pointer.null?
-        n = col.get_normal(0_i64)
-        angle = n.angle_to(Vector3::UP)
-        if angle > best_angle
-          best_angle = angle
-          best_normal = n
+        c_count = col.get_collision_count
+        j = 0_i64
+        while j < c_count
+          n = col.get_normal(j)
+          angle = n.angle_to(Vector3::UP)
+          if angle > best_angle
+            best_angle = angle
+            best_normal = n
+          end
+          j += 1
         end
       end
       i += 1
@@ -995,7 +1000,8 @@ node SUCC < CharacterBody3D do
     return false if step_diff <= 0.01_f32 || step_diff > step_h + 0.01_f32
 
     # Verify surface normal is a walkable floor (not a steep ramp)
-    hit_normal = down_col.get_normal(0_i64)
+    has_normal = down_col.get_collision_count > 0
+    hit_normal = has_normal ? down_col.get_normal(0_i64) : Vector3::UP
     world = get_world_3d
     if !world.pointer.null?
       space_state = world.direct_space_state
@@ -1010,11 +1016,13 @@ node SUCC < CharacterBody3D do
         if space_state.intersect_ray_into(r_query, r_result)
           if r_result.collider_rid != get_rid && r_result.collider_id != get_instance_id.to_i64
             hit_normal = r_result.normal
+            has_normal = true
           end
         end
       end
     end
 
+    return false unless has_normal
     return false if hit_normal.angle_to(Vector3::UP) > floor_max_angle.to_f32
 
     # Commit the step: teleport onto the step surface
@@ -1061,6 +1069,7 @@ node SUCC < CharacterBody3D do
     step_pos = step_xf.origin + down_col.get_travel
     step_diff = step_pos.y - from_pos.y
     return false if step_diff <= 0.01_f32 || step_diff > step_h + 0.01_f32
+    return false if down_col.get_collision_count <= 0
 
     hit_normal = down_col.get_normal(0_i64)
     return false if hit_normal.angle_to(Vector3::UP) > floor_max_angle.to_f32
@@ -1091,6 +1100,7 @@ node SUCC < CharacterBody3D do
     travel = down_col.get_travel
     drop = -travel.y
     return if drop <= 0.001_f32 || drop > step_h + 0.01_f32
+    return if down_col.get_collision_count <= 0
 
     hit_normal = down_col.get_normal(0_i64)
     return if hit_normal.angle_to(Vector3::UP) > floor_max_angle.to_f32
