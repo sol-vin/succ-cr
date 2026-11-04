@@ -128,9 +128,9 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          PKGS="lld libgc-dev"
+          PKGS="libgc-dev"
           if [ -d "ext/libvlc" ] || grep -qiE "emerald|libvlc" shard.yml addons/*/*.gdextension 2>/dev/null; then
-            PKGS="$PKGS libvlc-dev vlc"
+            PKGS="$PKGS libvlc-dev"
           fi
           sudo apt-get install -y $PKGS
           GODOT_VER=$(sed -n 's/.*version:[[:space:]]*["'"'"']\?\([^"'"'"']\+\)["'"'"']\?.*/\1/p' godot-version.yml 2>/dev/null | tr -d '\r\n[:space:]')
@@ -333,9 +333,9 @@ jobs:
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          PKGS="lld libgc-dev g++ wget unzip curl"
+          PKGS="libgc-dev g++ wget unzip curl"
           if [ -d "ext/libvlc" ] || grep -qiE "emerald|libvlc" shard.yml addons/*/*.gdextension 2>/dev/null; then
-            PKGS="$PKGS libvlc-dev vlc"
+            PKGS="$PKGS libvlc-dev"
           fi
           sudo apt-get install -y $PKGS
       - name: Setup Godot Engine
@@ -691,6 +691,26 @@ jobs:
             $binPath = (Resolve-Path "bin").Path
             $binPath | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           }
+          if (-not (Test-Path "bin/crystal_bridge.dll")) {
+            Write-Host "Fetching pre-compiled Windows GDExtension bridge (target $godotVer)..."
+            try {
+              Invoke-WebRequest -Uri "https://github.com/sol-vin/lapis/releases/download/$godotVer/godot-crystal-addon-windows-x86_64.zip" -OutFile "addon-win.zip"
+              Expand-Archive -Path "addon-win.zip" -DestinationPath "bin" -Force
+              Remove-Item "addon-win.zip" -Force -ErrorAction SilentlyContinue
+            } catch {
+              try {
+                Invoke-WebRequest -Uri "https://github.com/sol-vin/lapis/releases/latest/download/godot-crystal-addon-windows-x86_64.zip" -OutFile "addon-win.zip"
+                Expand-Archive -Path "addon-win.zip" -DestinationPath "bin" -Force
+                Remove-Item "addon-win.zip" -Force -ErrorAction SilentlyContinue
+              } catch {
+                Write-Host "Windows bridge download fallback: $_"
+              }
+            }
+            if (Test-Path "bin/addons/crystal_integration/bin/crystal_bridge.dll") {
+              Copy-Item "bin/addons/crystal_integration/bin/crystal_bridge.dll" "bin/crystal_bridge.dll" -Force
+              Remove-Item -Recurse -Force "bin/addons" -ErrorAction SilentlyContinue
+            }
+          }
 
       - name: Build Addon Library (Release)
         shell: pwsh
@@ -782,7 +802,7 @@ jobs:
         shell: bash
         run: |
           if [ -d "ext/libvlc" ] || grep -qiE "emerald|libvlc" shard.yml addons/*/*.gdextension 2>/dev/null; then
-            sudo apt-get update && sudo apt-get install -y lld libgc-dev libvlc-dev vlc
+            sudo apt-get update && sudo apt-get install -y libgc-dev libvlc-dev
           fi
           GODOT_VER=$(sed -n 's/.*version:[[:space:]]*["'"'"']\?\([^"'"'"']\+\)["'"'"']\?.*/\1/p' godot-version.yml 2>/dev/null | tr -d '\r\n[:space:]')
           if [ -z "$GODOT_VER" ]; then GODOT_VER="4.8-beta2"; fi

@@ -62,8 +62,8 @@ jobs:
           fi
           if [ "${{ runner.os }}" = "Linux" ]; then
             sudo apt-get update
-            PKGS="lld make g++ libgc-dev wget unzip curl"
-            [ "$NEEDS_VLC" = "true" ] && PKGS="$PKGS libvlc-dev vlc"
+            PKGS="make g++ libgc-dev wget unzip curl"
+            [ "$NEEDS_VLC" = "true" ] && PKGS="$PKGS libvlc-dev"
             sudo apt-get install -y $PKGS
           elif [ "${{ runner.os }}" = "macOS" ] && [ "$NEEDS_VLC" = "true" ]; then
             brew install --cask vlc || true
@@ -350,16 +350,30 @@ jobs:
         shell: bash
         run: |
           if [ -f "Makefile" ]; then
-            make all || true
+            make all RELEASE=1 || true
           fi
           ADDON_NAME=$(awk '/^name:/ {print $2}' shard.yml 2>/dev/null | tr -d ' "\r\n')
           if [ -z "$ADDON_NAME" ]; then ADDON_NAME="crystal_addon"; fi
           SO_EXT="${{ runner.os == 'macOS' && 'dylib' || 'so' }}"
-          LINK_FLAG="${{ runner.os == 'macOS' && '-dynamiclib' || '-shared' }}"
-          if [ ! -f "addons/${ADDON_NAME}/bin/game.${SO_EXT}" ]; then
+          LINK_FLAG="${{ runner.os == 'macOS' && '-dynamiclib' || '-shared -fuse-ld=bfd' }}"
+          mkdir -p "addons/${ADDON_NAME}/bin"
+          if [ ! -f "addons/${ADDON_NAME}/bin/game.${SO_EXT}" ] && [ ! -f "bin/game.${SO_EXT}" ]; then
             echo "Fallback direct compilation..."
-            mkdir -p "addons/${ADDON_NAME}/bin"
-            crystal build src/main.cr -o "addons/${ADDON_NAME}/bin/game.${SO_EXT}" --link-flags "${LINK_FLAG}" -Dlibgodot_addon
+            crystal build src/main.cr -o "addons/${ADDON_NAME}/bin/game.${SO_EXT}" --link-flags "${LINK_FLAG}" --release -Dlibgodot_addon
+          fi
+          if [ ! -f "addons/${ADDON_NAME}/bin/crystal_bridge.${SO_EXT}" ]; then
+            if [ -f "bin/crystal_bridge.${SO_EXT}" ]; then
+              cp -f "bin/crystal_bridge.${SO_EXT}" "addons/${ADDON_NAME}/bin/crystal_bridge.${SO_EXT}"
+            elif [ -f "addons/crystal_integration/bin/crystal_bridge.${SO_EXT}" ]; then
+              cp -f "addons/crystal_integration/bin/crystal_bridge.${SO_EXT}" "addons/${ADDON_NAME}/bin/crystal_bridge.${SO_EXT}"
+            elif [ -f "lib/lapis/src/bridge/crystal_bridge.cpp" ]; then
+              CXX_CMD="${{ runner.os == 'macOS' && 'clang++' || 'g++' }}"
+              $CXX_CMD -std=c++17 -O2 -fPIC ${LINK_FLAG} -I lib/lapis/rsrc -I lib/lapis/src/bridge lib/lapis/src/bridge/crystal_bridge.cpp -o "addons/${ADDON_NAME}/bin/crystal_bridge.${SO_EXT}" -ldl -lpthread
+            fi
+          fi
+          rm -rf addons/crystal_integration
+          if [ -f "bin/lapis" ]; then
+            ./bin/lapis deps -t "addons/${ADDON_NAME}/bin" || true
           fi
 
       - name: Build Addon Project (Windows)
@@ -373,13 +387,25 @@ jobs:
               $addonName = $matches[1].Trim()
             }
           }
+          New-Item -ItemType Directory -Path "addons/$addonName/bin" -Force | Out-Null
           if (Test-Path "Makefile") {
             try { make all } catch { Write-Host "Make fallback: $_" }
           }
           if (-not (Test-Path "addons/$addonName/bin/game.dll")) {
-            New-Item -ItemType Directory -Path "addons/$addonName/bin" -Force | Out-Null
             crystal build src/main.cr -o "addons/$addonName/bin/game.dll" --link-flags "/DLL /ENTRY:_DllMainCRTStartup /EXPORT:crystal_godot_init" -Dlibgodot_addon
-            if (Test-Path "bin/lapis.exe") { ./bin/lapis.exe deps -t "addons/$addonName/bin" }
+          }
+          if (-not (Test-Path "addons/$addonName/bin/crystal_bridge.dll")) {
+            if (Test-Path "bin/crystal_bridge.dll") {
+              Copy-Item "bin/crystal_bridge.dll" "addons/$addonName/bin/crystal_bridge.dll" -Force
+            } elseif (Test-Path "addons/crystal_integration/bin/crystal_bridge.dll") {
+              Copy-Item "addons/crystal_integration/bin/crystal_bridge.dll" "addons/$addonName/bin/crystal_bridge.dll" -Force
+            }
+          }
+          if (Test-Path "addons/crystal_integration") {
+            Remove-Item -Recurse -Force "addons/crystal_integration" -ErrorAction SilentlyContinue
+          }
+          if (Test-Path "bin/lapis.exe") {
+            ./bin/lapis.exe deps -t "addons/$addonName/bin"
           }
 
       - name: Run Godot Headless Smoke Test (Linux & macOS)
