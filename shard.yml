@@ -12,7 +12,7 @@ addons: {}
 dependencies:
   lapis:
     github: sol-vin/lapis
-    branch: 4.8-beta1
+    branch: 4.8-beta2
 
 targets:
   addon:
