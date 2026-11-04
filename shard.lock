@@ -1,0 +1,26 @@
+version: 2.0
+shards:
+  bakelite:
+    git: https://github.com/sol-vin/bakelite.git
+    version: 0.1.9+git.commit.d30096ef3c8c322050e079396a05db23dc7f6677
+
+  carbon:
+    git: https://github.com/sol-vin/carbon.git
+    version: 0.1.18+git.commit.9c1862475f5a611e2ac31212ba0b9407e9376503
+
+  cradare2:
+    git: https://github.com/sol-vin/cradare2.git
+    version: 0.2.30+git.commit.94e5f36af42402cf60aa73dc22bb3b3bd3f032f8
+
+  jasper:
+    git: https://github.com/sol-vin/jasper.git
+    version: 0.1.16+git.commit.b349b559023c7cf3020d437903a55f08ce1f007e
+
+  lapis:
+    git: https://github.com/sol-vin/lapis.git
+    version: 0.1.19+git.commit.56c198f42da4b5c10707eb5fd71c5d69958c1b5d
+
+  opal:
+    git: https://github.com/sol-vin/opal.git
+    version: 0.1.67+git.commit.87d1904ce3128261f8b16c689e4d426a7d789177
+
