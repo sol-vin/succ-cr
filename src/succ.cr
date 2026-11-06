@@ -302,7 +302,8 @@ node SUCC < CharacterBody3D do
       vel = velocity
       horiz_speed = Vector2.new(vel.x, vel.z).length
       rig.update_bob(horiz_speed, @floor_type == FloorType::GROUND, cfg, dt)
-      rig.update_tilt(vel, global_transform.basis.x, cfg, dt)
+      rig.update_tilt(vel, global_transform.basis * Vector3::RIGHT, cfg, dt)
+      rig.update_portal_reorient(cfg, dt)
     end
   end
 
@@ -1224,12 +1225,14 @@ node SUCC < CharacterBody3D do
     if prev.try(&.pointer) != hit_node.try(&.pointer)
       if old_node = prev
         if !old_node.pointer.null? && old_node.has_method("unfocus")
+          old_node.set_meta("last_interactor", self.pointer)
           old_node.call("unfocus")
         end
       end
       @focused_interactable = hit_node
       if new_node = hit_node
         if !new_node.pointer.null? && new_node.has_method("focus")
+          new_node.set_meta("last_interactor", self.pointer)
           new_node.call("focus")
         end
       end
@@ -1238,9 +1241,13 @@ node SUCC < CharacterBody3D do
 
   # Invokes `interact` on the currently focused `Interactable` node (or stands up if currently sitting and looking at nothing).
   def trigger_interact : Bool
+    if @focused_interactable.nil? || @focused_interactable.try(&.pointer.null?)
+      _update_interact_ray
+    end
     if target = @focused_interactable
       if !target.pointer.null? && target.has_method("interact")
-        target.call("interact", self)
+        target.set_meta("last_interactor", self.pointer)
+        target.call("interact")
         interacted.emit(target)
         return true
       end
@@ -1276,7 +1283,7 @@ node SUCC < CharacterBody3D do
     view_h = @is_crouched ? cfg.crouch_view_offset : cfg.standing_view_offset
 
     # Extract horizontal forward direction from seat_global_transform
-    fwd = -seat_global_transform.basis.z
+    fwd = seat_global_transform.basis * Vector3.new(0.0_f32, 0.0_f32, -1.0_f32)
     horiz_fwd = Vector3.new(fwd.x, 0.0_f32, fwd.z)
     yaw_angle = if horiz_fwd.length_squared > 1e-5_f32
                   Math.atan2(-horiz_fwd.x, -horiz_fwd.z)
@@ -1343,6 +1350,97 @@ node SUCC < CharacterBody3D do
     end
   end
 
+  # Computes a singularity-free upright target yaw and pitch from an orthonormalized exit camera basis:
+  # - Uses the sagittal horizon vector `v_sag = u_y * f_xz - f_y * u_xz` so straight-down (-90°), straight-up (+90°),
+  #   and slightly over-pitched transitions through downward/upward portals never gimbal-lock or flip yaw 180°.
+  # - When `horizon_pitch_assist` is true and `portal_tilt_cos < 0.995` (angled portal transition), clamps target pitch
+  #   to `±max_exit_pitch_deg` while `SUCCCamera` smoothly slerps from the exact 3D exit orientation at `t = 0`.
+  def self.compute_portal_exit_yaw_and_pitch(
+    exit_basis_in : Basis,
+    fallback_yaw : Float32,
+    portal_tilt_cos : Float32 = 1.0_f32,
+    horizon_pitch_assist : Bool = true,
+    max_exit_pitch_deg : Float32 = 55.0_f32,
+  ) : Tuple(Float32, Float32)
+    b = exit_basis_in.orthonormalized
+    f_exit = (b * Vector3.new(0.0_f32, 0.0_f32, -1.0_f32)).normalized
+    u_exit = (b * Vector3.new(0.0_f32, 1.0_f32, 0.0_f32)).normalized
+    r_exit = (b * Vector3.new(1.0_f32, 0.0_f32, 0.0_f32)).normalized
+
+    f_xz = Vector3.new(f_exit.x, 0.0_f32, f_exit.z)
+    u_xz = Vector3.new(u_exit.x, 0.0_f32, u_exit.z)
+    v_sag = (f_xz * u_exit.y) - (u_xz * f_exit.y)
+
+    target_yaw = if v_sag.length_squared > 1e-5_f32
+                   Math.atan2(-v_sag.x, -v_sag.z)
+                 else
+                   r_horiz = r_exit.cross(Vector3::UP)
+                   r_horiz_xz = Vector3.new(r_horiz.x, 0.0_f32, r_horiz.z)
+                   if r_horiz_xz.length_squared > 1e-5_f32
+                     Math.atan2(-r_horiz_xz.x, -r_horiz_xz.z)
+                   elsif f_xz.length_squared > 1e-5_f32
+                     Math.atan2(-f_xz.x, -f_xz.z)
+                   else
+                     fallback_yaw
+                   end
+                 end
+
+    raw_pitch = Math.asin(f_exit.y.clamp(-1.0_f32, 1.0_f32))
+    deg_to_rad = Math::PI.to_f32 / 180.0_f32
+    hard_limit = 89.0_f32 * deg_to_rad
+    target_pitch = if horizon_pitch_assist && portal_tilt_cos < 0.995_f32
+                     assist_limit = max_exit_pitch_deg.clamp(15.0_f32, 89.0_f32) * deg_to_rad
+                     raw_pitch.clamp(-assist_limit, assist_limit)
+                   else
+                     raw_pitch.clamp(-hard_limit, hard_limit)
+                   end
+
+    {target_yaw, target_pitch}
+  end
+
+  # Applies an upright target `(target_yaw, target_pitch)` to `SUCC` and `SUCCCamera` while preserving
+  # 100% 3D rotational (`exit_cam_basis`) and positional (`desired_eye_world_pos`) camera continuity at `t = 0`,
+  # smoothly decaying the residual roll/pitch quaternion and eye-to-hull position offset back to upright.
+  def apply_portal_camera_transition(
+    exit_cam_basis : Basis,
+    desired_eye_world_pos : Vector3,
+    target_yaw : Float32,
+    target_pitch : Float32,
+  ) : Void
+    cfg = active_config
+    view_h = @is_crouched ? cfg.crouch_view_offset : cfg.standing_view_offset
+
+    self.rotation = Vector3.new(0.0_f32, target_yaw, 0.0_f32)
+    @_step_Lists_offset = 0.0_f32
+
+    if rig = (@camera_rig || _find_camera_rig)
+      @camera_rig = rig
+      if rig.base_y.abs <= 1e-5_f32
+        rig.base_y = view_h
+      end
+      rig.set_step_offset(0.0_f32)
+      rig.set_physics_offset(Vector3.zero)
+      rig.rotation = Vector3.new(target_pitch, 0.0_f32, 0.0_f32)
+
+      if cfg.portal_smooth_reorient
+        b_rig = (Basis.from_axis_angle(Vector3::UP, target_yaw) * Basis.from_axis_angle(Vector3::RIGHT, target_pitch)).orthonormalized
+        b_exit = exit_cam_basis.orthonormalized
+        b_rel = (b_rig.transposed * b_exit).orthonormalized
+        rot_offset = SUCCCamera.basis_to_quaternion(b_rel)
+
+        upright_eye_pos = global_position + Vector3.new(0.0_f32, view_h, 0.0_f32)
+        world_eye_delta = desired_eye_world_pos - upright_eye_pos
+        if world_eye_delta.length > 1.25_f32
+          world_eye_delta = world_eye_delta.normalized * 1.25_f32
+        end
+        local_pos_offset = Basis.from_axis_angle(Vector3::UP, -target_yaw) * world_eye_delta
+        rig.set_portal_transition_offsets(rot_offset, local_pos_offset)
+      else
+        rig.clear_portal_transition_offsets
+      end
+    end
+  end
+
   # Queues a relative non-Euclidean portal teleport from `origin_node` to `target_node` on the next physics tick.
   def queue_teleport_in_relation_to(origin_node : Godot::Node3D, target_node : Godot::Node3D) : Void
     @_teleport_from = origin_node
@@ -1351,27 +1449,46 @@ node SUCC < CharacterBody3D do
   end
 
   # Immediately teleports the player from `origin_node`'s local space to `target_node`'s local space,
-  # preserving relative position, horizontal look orientation, and velocity vector.
+  # preserving eye-exact 3D camera continuity, smooth horizon reorientation, and velocity vector.
   def teleport_in_relation_to(origin_node : Godot::Node3D, target_node : Godot::Node3D) : Void
     return if @pointer.null? || origin_node.pointer.null? || target_node.pointer.null?
     orig_xf = origin_node.global_transform
     dest_xf = target_node.global_transform
+    cfg = active_config
+    view_h = @is_crouched ? cfg.crouch_view_offset : cfg.standing_view_offset
 
-    rel_xf = orig_xf.affine_inverse * global_transform
-    new_xf = dest_xf * rel_xf
+    rig = @camera_rig
+    enter_cam_xf = if r = rig
+                     r.effective_camera_global_transform
+                   else
+                     Transform3D.new(global_transform.basis, global_position + Vector3.new(0.0_f32, view_h, 0.0_f32))
+                   end
 
-    # Preserve upright character capsule while rotating horizontal yaw
-    fwd = -new_xf.basis.z
-    horiz_fwd = Vector3.new(fwd.x, 0.0_f32, fwd.z)
-    new_yaw = horiz_fwd.length_squared > 1e-5_f32 ? Math.atan2(-horiz_fwd.x, -horiz_fwd.z) : rotation.y
+    rel_cam_xf = orig_xf.affine_inverse * enter_cam_xf
+    exit_cam_xf = dest_xf * rel_cam_xf
+    exit_cam_basis = exit_cam_xf.basis.orthonormalized
 
-    self.global_position = new_xf.origin
-    self.rotation = Vector3.new(0.0_f32, new_yaw, 0.0_f32)
+    orig_up = (orig_xf.basis * Vector3::UP).normalized
+    dest_up = (dest_xf.basis * Vector3::UP).normalized
+    tilt_cos = Math.min(orig_up.dot(dest_up), Math.min(orig_up.dot(Vector3::UP), dest_up.dot(Vector3::UP)))
+
+    target_yaw, target_pitch = SUCC.compute_portal_exit_yaw_and_pitch(
+      exit_cam_basis,
+      rotation.y,
+      portal_tilt_cos: tilt_cos,
+      horizon_pitch_assist: cfg.portal_horizon_pitch_assist,
+      max_exit_pitch_deg: cfg.portal_max_exit_pitch_deg
+    )
+
+    desired_eye_pos = exit_cam_xf.origin
+    self.global_position = desired_eye_pos - Vector3.new(0.0_f32, view_h, 0.0_f32)
     @_phys_pos_prev = global_position
     @_phys_pos_curr = global_position
 
+    apply_portal_camera_transition(exit_cam_basis, desired_eye_pos, target_yaw, target_pitch)
+
     # Rotate velocity vector by the portal delta basis
-    rot_delta = dest_xf.basis * orig_xf.basis.inverse
+    rot_delta = dest_xf.basis.orthonormalized * orig_xf.basis.orthonormalized.transposed
     self.velocity = rot_delta * velocity
   end
 end

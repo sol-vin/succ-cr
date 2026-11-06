@@ -215,9 +215,34 @@ resource SUCCConfig < Resource do
   @[ExportRange(0.1_f32, 20.0_f32, 0.1_f32)]
   property mouse_sensitivity : Float32 = 2.5_f32
 
-  # Degrees rotated per mouse count at sensitivity 1.0 (m_yaw = 0.022)
+  # degrees rotated per mouse count at sensitivity 1.0 (m_yaw = 0.022)
   @[ExportRange(0.001_f32, 0.1_f32, 0.001_f32, suffix: "°")]
   property degrees_per_unit : Float32 = 0.022_f32
+
+  # ===========================================================================
+  # Portal Reorientation
+  # ===========================================================================
+  @[ExportGroup("Portal Reorientation")]
+
+  # Smoothly rotate camera roll and pitch offset back to upright world horizon after crossing angled portals
+  @[Export]
+  property portal_smooth_reorient : Bool = true
+
+  # Angular smoothing rate for camera reorientation after crossing an angled portal (higher = faster, 8.0 = ~0.35s)
+  @[ExportRange(1.0_f32, 30.0_f32, 0.5_f32)]
+  property portal_reorient_speed : Float32 = 8.0_f32
+
+  # Positional smoothing rate for eye-to-hull offset after crossing an angled portal
+  @[ExportRange(1.0_f32, 40.0_f32, 0.5_f32)]
+  property portal_pos_smooth_speed : Float32 = 12.0_f32
+
+  # Gently ease steep portal-induced exit pitches toward the horizon while preserving full manual mouse pitch range
+  @[Export]
+  property portal_horizon_pitch_assist : Bool = true
+
+  # Maximum target exit pitch angle (degrees) when portal_horizon_pitch_assist is enabled (55° = Portal-style comfortable view)
+  @[ExportRange(20.0_f32, 89.0_f32, 1.0_f32, suffix: "°")]
+  property portal_max_exit_pitch_deg : Float32 = 55.0_f32
 
   # ===========================================================================
   # Unit Conversion & Preset Helpers

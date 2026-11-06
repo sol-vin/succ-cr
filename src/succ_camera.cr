@@ -34,6 +34,75 @@ node SUCCCamera < SpringArm3D do
   @_bob_offset : Float32 = 0.0_f32
   @_bob_time : Float32 = 0.0_f32
   @_tilt : Float32 = 0.0_f32
+  @_portal_rot_offset : Quaternion = Quaternion::IDENTITY
+  @_portal_pos_offset : Vector3 = Vector3.zero
+
+  def portal_rot_offset : Quaternion
+    @_portal_rot_offset
+  end
+
+  def portal_pos_offset : Vector3
+    @_portal_pos_offset
+  end
+
+  def has_active_portal_reorient? : Bool
+    !@_portal_rot_offset.is_equal_approx(Quaternion::IDENTITY) || @_portal_pos_offset.length_squared > 1e-6_f32
+  end
+
+  # Converts a unit Quaternion into a Godot::Basis (where Basis.@x/@y/@z are matrix rows).
+  def self.quaternion_to_basis(q : Quaternion) : Basis
+    qn = q.is_normalized? ? q : q.normalized
+    d = qn.length_squared
+    return Basis::IDENTITY if d <= 1e-8_f32
+    s = 2.0_f32 / d
+    xs = qn.x * s
+    ys = qn.y * s
+    zs = qn.z * s
+    wx = qn.w * xs
+    wy = qn.w * ys
+    wz = qn.w * zs
+    xx = qn.x * xs
+    xy = qn.x * ys
+    xz = qn.x * zs
+    yy = qn.y * ys
+    yz = qn.y * zs
+    zz = qn.z * zs
+    Basis.new(
+      Vector3.new(1.0_f32 - (yy + zz), xy - wz, xz + wy),
+      Vector3.new(xy + wz, 1.0_f32 - (xx + zz), yz - wx),
+      Vector3.new(xz - wy, yz + wx, 1.0_f32 - (xx + yy))
+    )
+  end
+
+  # Converts an orthonormalized Godot::Basis into a unit Quaternion using Shepperd's method.
+  def self.basis_to_quaternion(b_in : Basis) : Quaternion
+    b = b_in.orthonormalized
+    m00 = b.x.x; m01 = b.x.y; m02 = b.x.z
+    m10 = b.y.x; m11 = b.y.y; m12 = b.y.z
+    m20 = b.z.x; m21 = b.z.y; m22 = b.z.z
+    trace = m00 + m11 + m22
+    if trace > 0.0_f32
+      s = Math.sqrt(trace + 1.0_f32)
+      w = s * 0.5_f32
+      s = 0.5_f32 / s
+      Quaternion.new((m21 - m12) * s, (m02 - m20) * s, (m10 - m01) * s, w).normalized
+    elsif m00 >= m11 && m00 >= m22
+      s = Math.sqrt(1.0_f32 + m00 - m11 - m22)
+      x = s * 0.5_f32
+      s = 0.5_f32 / s
+      Quaternion.new(x, (m10 + m01) * s, (m02 + m20) * s, (m21 - m12) * s).normalized
+    elsif m11 >= m22
+      s = Math.sqrt(1.0_f32 + m11 - m00 - m22)
+      y = s * 0.5_f32
+      s = 0.5_f32 / s
+      Quaternion.new((m10 + m01) * s, y, (m21 + m12) * s, (m02 - m20) * s).normalized
+    else
+      s = Math.sqrt(1.0_f32 + m22 - m00 - m11)
+      z = s * 0.5_f32
+      s = 0.5_f32 / s
+      Quaternion.new((m02 + m20) * s, (m21 + m12) * s, z, (m10 - m01) * s).normalized
+    end
+  end
 
   def base_y : Float32
     @base_y
@@ -133,10 +202,95 @@ node SUCCCamera < SpringArm3D do
   end
 
   def _apply_offsets : Void
+    if @base_y.abs <= 1e-5_f32 && position.y > 1e-4_f32
+      @base_y = position.y
+    end
     self.position = Vector3.new(
-      @_physics_offset.x,
-      @base_y + @step_offset + @_bob_offset + @_physics_offset.y,
-      @_physics_offset.z
+      @_physics_offset.x + @_portal_pos_offset.x,
+      @base_y + @step_offset + @_bob_offset + @_physics_offset.y + @_portal_pos_offset.y,
+      @_physics_offset.z + @_portal_pos_offset.z
+    )
+  end
+
+  def _apply_portal_camera_rotation : Void
+    cam = @camera
+    if cam.nil? && !@pointer.null?
+      cam = _find_camera(self)
+      @camera = cam
+    end
+    if c = cam
+      if !c.pointer.null?
+        c.basis = SUCCCamera.quaternion_to_basis(@_portal_rot_offset)
+      end
+    end
+  end
+
+  # Sets the initial 3D rotational and local positional offsets immediately after crossing an angled portal.
+  def set_portal_transition_offsets(rot_offset : Quaternion, local_pos_offset : Vector3) : Void
+    @_portal_rot_offset = rot_offset.is_finite? ? rot_offset.normalized : Quaternion::IDENTITY
+    @_portal_pos_offset = local_pos_offset.is_finite? ? local_pos_offset : Vector3.zero
+    _apply_offsets
+    _apply_portal_camera_rotation
+  end
+
+  # Immediately clears any active portal transition rotation/position offsets.
+  def clear_portal_transition_offsets : Void
+    @_portal_rot_offset = Quaternion::IDENTITY
+    @_portal_pos_offset = Vector3.zero
+    _apply_offsets
+    _apply_portal_camera_rotation
+  end
+
+  # Smoothly decays the portal transition rotational offset (via quaternion slerp to IDENTITY)
+  # and local positional offset (via exponential lerp to ZERO) toward the upright world horizon.
+  def update_portal_reorient(config : SUCCConfig, delta : Float32) : Void
+    if !config.portal_smooth_reorient
+      if has_active_portal_reorient?
+        clear_portal_transition_offsets
+      end
+      return
+    end
+
+    rot_changed = false
+    if !@_portal_rot_offset.is_equal_approx(Quaternion::IDENTITY)
+      alpha_rot = (1.0_f32 - Math.exp(-config.portal_reorient_speed * delta)).clamp(0.0_f32, 1.0_f32)
+      @_portal_rot_offset = @_portal_rot_offset.slerp(Quaternion::IDENTITY, alpha_rot).normalized
+      if @_portal_rot_offset.get_angle.abs < 0.0005_f32
+        @_portal_rot_offset = Quaternion::IDENTITY
+      end
+      rot_changed = true
+    end
+
+    pos_changed = false
+    if @_portal_pos_offset.length_squared > 1e-7_f32
+      alpha_pos = (1.0_f32 - Math.exp(-config.portal_pos_smooth_speed * delta)).clamp(0.0_f32, 1.0_f32)
+      @_portal_pos_offset = @_portal_pos_offset.lerp(Vector3.zero, alpha_pos)
+      if @_portal_pos_offset.length_squared <= 1e-7_f32
+        @_portal_pos_offset = Vector3.zero
+      end
+      pos_changed = true
+    end
+
+    _apply_offsets if pos_changed
+    _apply_portal_camera_rotation if rot_changed
+  end
+
+  # Returns the effective world-space camera transform including any active portal rotational/positional offsets.
+  def effective_camera_global_transform : Transform3D
+    cam = @camera
+    if cam.nil? && !@pointer.null?
+      cam = _find_camera(self)
+      @camera = cam
+    end
+    if c = cam
+      if !c.pointer.null?
+        return c.global_transform
+      end
+    end
+    rig_xf = global_transform
+    Transform3D.new(
+      (rig_xf.basis * SUCCCamera.quaternion_to_basis(@_portal_rot_offset)).orthonormalized,
+      rig_xf.origin
     )
   end
 
@@ -167,6 +321,11 @@ node SUCCCamera < SpringArm3D do
       clamped_yaw = (@accumulated_sit_yaw + yaw_delta).clamp(min_yaw, max_yaw)
       yaw_delta = clamped_yaw - @accumulated_sit_yaw
       @accumulated_sit_yaw = clamped_yaw
+    end
+
+    if @_portal_pos_offset.length_squared > 1e-7_f32 && yaw_delta.abs > 1e-6_f32
+      @_portal_pos_offset = Basis.from_axis_angle(Vector3::UP, -yaw_delta) * @_portal_pos_offset
+      _apply_offsets
     end
 
     if target = @yaw_target
