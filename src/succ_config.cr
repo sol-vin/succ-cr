@@ -43,11 +43,11 @@ resource SUCCConfig < Resource do
 
   # Ground friction multiplier (sv_friction)
   @[Export]
-  property friction : Float32 = 4.0_f32
+  property friction : Float32 = 8.0_f32
 
-  # Below this speed, friction uses this value instead (sv_stopspeed, 100 u/s)
+  # Below this speed, friction uses this value instead (sv_stopspeed)
   @[Export(suffix: "m/s")]
-  property stop_speed : Float32 = 2.54_f32
+  property stop_speed : Float32 = 3.2_f32
 
   # Maximum ground movement speed (sv_maxspeed, 320 u/s)
   @[Export(suffix: "m/s")]
@@ -104,9 +104,9 @@ resource SUCCConfig < Resource do
   @[Export(suffix: "m")]
   property width : Float32 = 0.813_f32
 
-  # Maximum stair step height (sv_stepsize, 18u)
+  # Maximum stair step height (0.55m comfortably clears 16-unit / 0.50m TrenchBroom stairs)
   @[Export(suffix: "m")]
-  property step_height : Float32 = 0.457_f32
+  property step_height : Float32 = 0.55_f32
 
   def stand_height=(val : Float32) : Float32
     unless (@stand_height - val).abs < 0.00001_f32
@@ -175,7 +175,7 @@ resource SUCCConfig < Resource do
 
   # How fast the stair step camera offset decays
   @[ExportRange(1.0_f32, 30.0_f32, 0.5_f32)]
-  property step_smoothing_speed : Float32 = 14.0_f32
+  property step_smoothing_speed : Float32 = 11.0_f32
 
   # ===========================================================================
   # Head Bob & Tilt
@@ -319,8 +319,11 @@ resource SUCCConfig < Resource do
     cfg = Godot::Bridge.init_done? ? SUCCConfig.create : SUCCConfig.new
     cfg.jump_height = 1.128_f32
     cfg.bhop_buffered_jump = false
+    cfg.friction = 4.0_f32
+    cfg.stop_speed = 2.54_f32
     cfg.max_velocity = 50.8_f32
     cfg.enforce_max_velocity = true
+    cfg.step_height = 0.457_f32
     cfg.crouch_transition_mode = CrouchTransitionMode::SNAP
     cfg.smooth_vertical_step = false
     cfg.bob_cycle = 0.8_f32
@@ -334,9 +337,12 @@ resource SUCCConfig < Resource do
     cfg.gravity = 15.24_f32
     cfg.jump_height = 0.533_f32
     cfg.bhop_buffered_jump = false
+    cfg.friction = 4.0_f32
+    cfg.stop_speed = 2.54_f32
     cfg.max_speed = 4.826_f32
     cfg.enforce_max_velocity = true
     cfg.sprint_speed_modifier = 1.684_f32
+    cfg.step_height = 0.457_f32
     cfg.bob_amount = 0.0_f32
     cfg.bob_cycle = 0.8_f32
     cfg.tilt_angle = 0.0_f32

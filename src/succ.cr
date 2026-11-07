@@ -165,8 +165,8 @@ node SUCC < CharacterBody3D do
   @_step_Lists_offset : Float32 = 0.0_f32
   @_just_jumped : Bool = false
   @_pre_move_y_vel : Float32 = 0.0_f32
-  @_phys_pos_prev : Vector3 = Vector3.zero
-  @_phys_pos_curr : Vector3 = Vector3.zero
+  property _phys_pos_prev : Vector3 = Vector3.zero
+  property _phys_pos_curr : Vector3 = Vector3.zero
 
   # Smooth crouch view transition state (cubic ease-out)
   @_crouch_tween_active : Bool = false
@@ -741,12 +741,12 @@ node SUCC < CharacterBody3D do
       if crouching && !@is_crouched
         self.global_position = global_position + Vector3.new(0.0_f32, height_diff, 0.0_f32)
         if cfg.smooth_vertical_step && cfg.crouch_transition_mode == SUCCConfig::CrouchTransitionMode::SMOOTH
-          @_step_Lists_offset -= height_diff
+          _record_vertical_step_offset(height_diff)
         end
       elsif !crouching && @is_crouched
         self.global_position = global_position - Vector3.new(0.0_f32, height_diff, 0.0_f32)
         if cfg.smooth_vertical_step && cfg.crouch_transition_mode == SUCCConfig::CrouchTransitionMode::SMOOTH
-          @_step_Lists_offset += height_diff
+          _record_vertical_step_offset(-height_diff)
         end
       end
     end
@@ -809,6 +809,11 @@ node SUCC < CharacterBody3D do
       return
     end
 
+    # Reset vertical velocity before ground friction/acceleration so previous-frame slope Y velocity
+    # never re-injects downhill horizontal drift.
+    vel_ground = velocity
+    self.velocity = Vector3.new(vel_ground.x, 0.0_f32, vel_ground.z)
+
     _apply_friction(delta)
 
     wish_speed = cfg.max_speed
@@ -820,13 +825,19 @@ node SUCC < CharacterBody3D do
 
     _ground_accelerate(wish_dir, wish_speed, cfg.acceleration, delta)
 
-    # Project velocity onto the floor plane so slopes don't launch the player
+    vel_after = velocity
+    horiz_sq = vel_after.x * vel_after.x + vel_after.z * vel_after.z
+    if wish_dir.length_squared < 0.0001_f32 && horiz_sq < 0.0025_f32
+      self.velocity = Vector3.zero
+      return
+    end
+
+    # Align horizontal velocity with the walkable floor slope without deflecting downhill
     floor_n = get_floor_normal
     if floor_n != Vector3::UP && floor_n.length_squared > 0.0_f32
-      self.velocity = SUCC.clip_velocity(velocity, floor_n)
+      self.velocity = SUCC.slope_tangent_velocity(vel_after, floor_n)
     else
-      vel = velocity
-      self.velocity = Vector3.new(vel.x, 0.0_f32, vel.z)
+      self.velocity = Vector3.new(vel_after.x, 0.0_f32, vel_after.z)
     end
   end
 
@@ -896,7 +907,7 @@ node SUCC < CharacterBody3D do
     horiz = Vector2.new(vel.x, vel.z)
     speed = horiz.length
     if speed < 0.001_f32
-      self.velocity = Vector3.new(0.0_f32, vel.y, 0.0_f32)
+      self.velocity = Vector3.zero
       return
     end
 
@@ -906,7 +917,15 @@ node SUCC < CharacterBody3D do
     new_speed = 0.0_f32 if new_speed < 0.0_f32
     new_speed /= speed
 
-    self.velocity = Vector3.new(vel.x * new_speed, vel.y, vel.z * new_speed)
+    self.velocity = Vector3.new(vel.x * new_speed, vel.y * new_speed, vel.z * new_speed)
+  end
+
+  # Projects a horizontal velocity vector `(horiz_vel.x, 0, horiz_vel.z)` onto a walkable floor plane
+  # with normal `floor_n` (`v . floor_n == 0`) while preserving horizontal direction without downhill drift.
+  def self.slope_tangent_velocity(horiz_vel : Vector3, floor_n : Vector3) : Vector3
+    return Vector3.new(horiz_vel.x, 0.0_f32, horiz_vel.z) if floor_n.y <= 0.01_f32
+    vy = -(horiz_vel.x * floor_n.x + horiz_vel.z * floor_n.z)
+    Vector3.new(horiz_vel.x * floor_n.y, vy, horiz_vel.z * floor_n.y)
   end
 
   # Quake PM_ClipVelocity: project velocity onto surface plane (overbounce = 1.0)
@@ -936,6 +955,21 @@ node SUCC < CharacterBody3D do
   # Stair Stepping & View Smoothing
   # ===========================================================================
 
+  # Records a discrete vertical step `delta_y` (`new_y - old_y`) into `@_step_Lists_offset` and shifts
+  # `@_phys_pos_prev.y` by the absorbed amount so manual physics interpolation never double-subtracts the step.
+  def _record_vertical_step_offset(delta_y : Float32) : Void
+    cfg = active_config
+    max_off = Math.max(0.25_f32, cfg.step_height * 1.35_f32)
+    old_off = @_step_Lists_offset
+    new_off = (old_off - delta_y).clamp(-max_off, max_off)
+    absorbed_y = old_off - new_off
+    @_step_Lists_offset = new_off
+    @_phys_pos_prev = Vector3.new(@_phys_pos_prev.x, @_phys_pos_prev.y + absorbed_y, @_phys_pos_prev.z)
+    if rig = @camera_rig
+      rig.set_step_offset(@_step_Lists_offset)
+    end
+  end
+
   def _move_with_steps(delta : Float32) : Void
     cfg = active_config
     step_h = cfg.step_height
@@ -948,7 +982,12 @@ node SUCC < CharacterBody3D do
       vel = velocity
       horiz_vel = Vector3.new(vel.x, 0.0_f32, vel.z)
       if horiz_vel.length_squared > 0.0001_f32 && _try_step_up(horiz_vel * delta, step_h)
+        # `_try_step_up` already advanced horizontally by `horiz_travel` onto the step surface.
+        # Perform a zero-horizontal floor-registration slide so Godot updates `is_on_floor` without double-moving.
+        saved_vel = velocity
+        self.velocity = Vector3.new(0.0_f32, -0.05_f32, 0.0_f32)
         move_and_slide
+        self.velocity = saved_vel
         return
       end
       move_and_slide
@@ -956,7 +995,13 @@ node SUCC < CharacterBody3D do
       vel = velocity
       horiz_vel = Vector3.new(vel.x, 0.0_f32, vel.z)
       if horiz_vel.length_squared > 0.0001_f32 && vel.y <= 0.0_f32
-        _try_air_step(horiz_vel * delta, step_h)
+        if _try_air_step(horiz_vel * delta, step_h)
+          saved_vel = velocity
+          self.velocity = Vector3.new(0.0_f32, -0.05_f32, 0.0_f32)
+          move_and_slide
+          self.velocity = saved_vel
+          return
+        end
       end
       move_and_slide
     else
@@ -966,13 +1011,28 @@ node SUCC < CharacterBody3D do
 
   def _try_step_up(horiz_motion : Vector3, step_h : Float32) : Bool
     return false if @pointer.null?
-    # Only step up if horizontal movement is actually blocked at current height
-    return false unless test_move(global_transform, horiz_motion)
-
-    from_pos = global_position
     up_col = @_up_collision || Godot::KinematicCollision3D.create
     fwd_col = @_fwd_collision || Godot::KinematicCollision3D.create
     down_col = @_down_collision || Godot::KinematicCollision3D.create
+
+    # Only step up if horizontal movement is blocked at current height by a non-walkable step/riser
+    return false unless test_move(global_transform, horiz_motion, fwd_col)
+    if fwd_col.get_collision_count > 0
+      has_steep_blocker = false
+      c_cnt = fwd_col.get_collision_count
+      ci = 0_i64
+      while ci < c_cnt
+        n = fwd_col.get_normal(ci)
+        if n.angle_to(Vector3::UP) > floor_max_angle.to_f32
+          has_steep_blocker = true
+          break
+        end
+        ci += 1
+      end
+      return false unless has_steep_blocker
+    end
+
+    from_pos = global_position
 
     # 1. Sweep up by step_h (using actual travel if ceiling is lower)
     up_vec = Vector3.new(0.0_f32, step_h, 0.0_f32)
@@ -983,11 +1043,35 @@ node SUCC < CharacterBody3D do
       raised_pos = from_pos + up_travel
     end
 
-    # 2. Sweep forward at the raised height
+    # 2. Sweep forward at the raised height (sliding along side walls/handrails if blocked laterally)
     raised_xf = Transform3D.new(global_transform.basis, raised_pos)
     horiz_travel = horiz_motion
     if test_move(raised_xf, horiz_motion, fwd_col)
-      horiz_travel = fwd_col.get_travel
+      first_travel = fwd_col.get_travel
+      rem = horiz_motion - first_travel
+      if fwd_col.get_collision_count > 0
+        wall_n = fwd_col.get_normal(0_i64)
+        wall_n_xz = Vector3.new(wall_n.x, 0.0_f32, wall_n.z)
+        if wall_n_xz.length_squared > 1e-4_f32
+          wall_n_xz = wall_n_xz.normalized
+          slide_rem = SUCC.clip_velocity(rem, wall_n_xz)
+          slide_rem = Vector3.new(slide_rem.x, 0.0_f32, slide_rem.z)
+          if slide_rem.length_squared > 1e-6_f32
+            mid_xf = Transform3D.new(global_transform.basis, raised_pos + first_travel)
+            if test_move(mid_xf, slide_rem, fwd_col)
+              horiz_travel = first_travel + fwd_col.get_travel
+            else
+              horiz_travel = first_travel + slide_rem
+            end
+          else
+            horiz_travel = first_travel
+          end
+        else
+          horiz_travel = first_travel
+        end
+      else
+        horiz_travel = first_travel
+      end
       return false if Vector2.new(horiz_travel.x, horiz_travel.z).length < 0.001_f32
     end
 
@@ -1029,21 +1113,38 @@ node SUCC < CharacterBody3D do
     # Commit the step: teleport onto the step surface
     self.global_position = step_pos
     vel = velocity
-    self.velocity = Vector3.new(vel.x, 0.0_f32, vel.z)
+    self.velocity = SUCC.slope_tangent_velocity(Vector3.new(vel.x, 0.0_f32, vel.z), hit_normal)
+    @floor_type = FloorType::GROUND
+    @surf_normal = hit_normal
     if active_config.smooth_vertical_step
-      @_step_Lists_offset -= step_diff
+      _record_vertical_step_offset(step_diff)
     end
     true
   end
 
   def _try_air_step(horiz_motion : Vector3, step_h : Float32) : Bool
     return false if @pointer.null?
-    return false unless test_move(global_transform, horiz_motion)
-
-    from_pos = global_position
     up_col = @_up_collision || Godot::KinematicCollision3D.create
     fwd_col = @_fwd_collision || Godot::KinematicCollision3D.create
     down_col = @_down_collision || Godot::KinematicCollision3D.create
+
+    return false unless test_move(global_transform, horiz_motion, fwd_col)
+    if fwd_col.get_collision_count > 0
+      has_steep_blocker = false
+      c_cnt = fwd_col.get_collision_count
+      ci = 0_i64
+      while ci < c_cnt
+        n = fwd_col.get_normal(ci)
+        if n.angle_to(Vector3::UP) > floor_max_angle.to_f32
+          has_steep_blocker = true
+          break
+        end
+        ci += 1
+      end
+      return false unless has_steep_blocker
+    end
+
+    from_pos = global_position
 
     # 1. Sweep up by step_h
     up_vec = Vector3.new(0.0_f32, step_h, 0.0_f32)
@@ -1077,10 +1178,11 @@ node SUCC < CharacterBody3D do
 
     self.global_position = step_pos
     vel = velocity
-    self.velocity = Vector3.new(vel.x, 0.0_f32, vel.z)
+    self.velocity = SUCC.slope_tangent_velocity(Vector3.new(vel.x, 0.0_f32, vel.z), hit_normal)
     @floor_type = FloorType::GROUND
+    @surf_normal = hit_normal
     if active_config.smooth_vertical_step
-      @_step_Lists_offset -= step_diff
+      _record_vertical_step_offset(step_diff)
     end
     true
   end
@@ -1108,10 +1210,11 @@ node SUCC < CharacterBody3D do
 
     self.global_position = global_position + travel
     vel = velocity
-    self.velocity = Vector3.new(vel.x, 0.0_f32, vel.z)
+    self.velocity = SUCC.slope_tangent_velocity(Vector3.new(vel.x, 0.0_f32, vel.z), hit_normal)
     @floor_type = FloorType::GROUND
+    @surf_normal = hit_normal
     if cfg.smooth_vertical_step
-      @_step_Lists_offset += drop
+      _record_vertical_step_offset(-drop)
     end
   end
 
@@ -1119,12 +1222,15 @@ node SUCC < CharacterBody3D do
     rig = @camera_rig
     return unless rig
     cfg = active_config
-    if !cfg.smooth_vertical_step || @_step_Lists_offset.abs < 0.001_f32
+    if !cfg.smooth_vertical_step || @_step_Lists_offset.abs < 0.0005_f32
       @_step_Lists_offset = 0.0_f32
       rig.set_step_offset(0.0_f32)
       return
     end
-    @_step_Lists_offset = Math.lerp(@_step_Lists_offset, 0.0_f32, (delta * cfg.step_smoothing_speed).clamp(0.0_f32, 1.0_f32))
+    alpha = (1.0_f32 - Math.exp(-cfg.step_smoothing_speed * delta)).clamp(0.0_f32, 1.0_f32)
+    decayed = Math.lerp(@_step_Lists_offset, 0.0_f32, alpha)
+    # Add a gentle minimum linear convergence so residual sub-centimeter offset finishes smoothly
+    @_step_Lists_offset = Math.move_toward(decayed, 0.0_f32, delta * 0.15_f32)
     rig.set_step_offset(@_step_Lists_offset)
   end
 
@@ -1208,6 +1314,17 @@ node SUCC < CharacterBody3D do
     nil
   end
 
+  # Returns the world-space collision point of the player's interaction raycast (or `nil`).
+  def get_interact_hit_point : Vector3?
+    return nil if @pointer.null?
+    if ray = @interact_ray
+      if !ray.pointer.null? && ray.is_colliding
+        return ray.get_collision_point
+      end
+    end
+    nil
+  end
+
   # Resolves a hit collider (or its ancestor) that responds to `interact`.
   def _resolve_interactable(node : Godot::Node?) : Godot::Node?
     curr = node
@@ -1220,6 +1337,13 @@ node SUCC < CharacterBody3D do
 
   def _update_interact_ray : Void
     hit_node = _resolve_interactable(get_interact_collider)
+    if active = hit_node
+      if !active.pointer.null?
+        if hit_pt = get_interact_hit_point
+          active.set_meta("last_interact_hit_pos", hit_pt)
+        end
+      end
+    end
     prev = @focused_interactable
 
     if prev.try(&.pointer) != hit_node.try(&.pointer)
@@ -1246,6 +1370,9 @@ node SUCC < CharacterBody3D do
     end
     if target = @focused_interactable
       if !target.pointer.null? && target.has_method("interact")
+        if hit_pt = get_interact_hit_point
+          target.set_meta("last_interact_hit_pos", hit_pt)
+        end
         target.set_meta("last_interactor", self.pointer)
         target.call("interact")
         interacted.emit(target)

@@ -147,6 +147,28 @@ describe SUCC do
     clipped.y.should be_close(0.0_f32, 0.0001_f32)
     clipped.z.should be_close(5.0_f32, 0.0001_f32)
   end
+
+  it "projects horizontal velocity onto sloped floor planes without downhill drift (SUCC.slope_tangent_velocity)" do
+    angle = 30.0_f32 * (Math::PI.to_f32 / 180.0_f32)
+    ramp_n = Godot::Vector3.new(0.0_f32, Math.cos(angle), Math.sin(angle)).normalized
+    zero_slope_v = SUCC.slope_tangent_velocity(Godot::Vector3.zero, ramp_n)
+    zero_slope_v.length.should be_close(0.0_f32, 1e-6_f32)
+
+    uphill_v = SUCC.slope_tangent_velocity(Godot::Vector3.new(0.0_f32, 0.0_f32, -5.0_f32), ramp_n)
+    uphill_v.dot(ramp_n).abs.should be < 1e-5_f32
+    uphill_v.y.should be > 0.0_f32
+    uphill_v.x.abs.should be < 1e-6_f32
+
+    downhill_v = SUCC.slope_tangent_velocity(Godot::Vector3.new(0.0_f32, 0.0_f32, 5.0_f32), ramp_n)
+    downhill_v.dot(ramp_n).abs.should be < 1e-5_f32
+    downhill_v.y.should be < 0.0_f32
+    downhill_v.x.abs.should be < 1e-6_f32
+
+    cross_slope_v = SUCC.slope_tangent_velocity(Godot::Vector3.new(4.0_f32, 0.0_f32, 0.0_f32), ramp_n)
+    cross_slope_v.dot(ramp_n).abs.should be < 1e-5_f32
+    cross_slope_v.z.abs.should be < 1e-6_f32
+    cross_slope_v.y.abs.should be < 1e-6_f32
+  end
 end
 
 describe SUCCTestLevel do
