@@ -1,5 +1,5 @@
 name: succ_cr
-version: 0.1.17
+version: 0.1.18
 description: Source Engine Unofficial Character Controller (SUCC) ported to Crystal for Lapis â€” Quake/Source-style 3D character movement for Godot 4
 authors:
   - Ian Rash <redcodefinal@gmail.com>
